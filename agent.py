@@ -36,7 +36,7 @@ class Sender(pygics.Task):
         ld_lock.release()
         print 'sending refresh data'
 
-class Subscriber(acidipy.SubscribeHandler):
+class Subscriber(acidipy.Event):
     
     def subscribe(self, status, obj):
         if self.class_name == 'healthInst': obj['cur'] = int(obj['cur'])
@@ -116,4 +116,4 @@ if __name__ == '__main__':
     
     Sender(refresh)
     
-    while True: pygics.Time.sleep(36000)
+    pygics.Task.idle()
