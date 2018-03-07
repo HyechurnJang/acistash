@@ -17,67 +17,122 @@ apic_ctrl = None
 logstash_ip = None
 logstash_sock = None
 refresh = None
+debug = False
+dump = True
 olist = None
-livedata = {}
-ld_lock = pygics.Lock()
+dumpdata = {}
+dd_lock = pygics.Lock()
 
-class Sender(pygics.Task):
+class Handler(acidipy.Event):
     
-    def __init__(self, tick):
-        pygics.Task.__init__(self, tick=tick)
+    def __handle_dump__(self, status, obj):
+        if status == 'created': dumpdata[self.class_name][obj['dn']] = obj
+        elif status == 'deleted': dumpdata[self.class_name].pop(obj['dn'])
+        else:
+            for key, val in obj.items(): dumpdata[self.class_name][obj['dn']][key] = val
+    
+    def __handle_event__(self, status, obj):
+        logstash_sock.send(json.dumps(obj) + '\n')
+    
+    def handle(self, status, obj):
+        if self.class_name == 'healthInst': obj['cur'] = int(obj['cur'])
+        obj['class_name'] = self.class_name
+        dd_lock.acquire()
+        if dump: self.__handle_dump__(status, obj)
+        else: self.__handle_event__(status, obj)
+        dd_lock.release()
+        if debug: print 'subscribe|%s|%s' % (self.class_name, str(obj))
+
+class Trigger(pygics.Task):
+    
+    def __init__(self):
+        pygics.Task.__init__(self, tick=refresh)
+        print 'initialize trigger --> ',
+        if dump: self.__init_dump__()
+        else: self.__init_event__()
+    
+    def __init_dump__(self):
+        try:
+            for class_name in olist:
+                dumpdata[class_name] = {}
+                objs = apic_ctrl.Class(class_name).list(detail=True)
+                for obj in objs:
+                    if class_name == 'healthInst': obj['cur'] = int(obj['cur'])
+                    obj['class_name'] = class_name
+                    dumpdata[class_name][obj['dn']] = obj
+                apic_ctrl.Class(class_name).event(Handler())
+        except Exception as e:
+            print '[ FAILED ]'
+            if debug: print str(e)
+            logstash_sock.close()
+            apic_ctrl.close()
+            exit(1)
+        
         self.start()
+        print '[ OK ]'
     
-    def run(self):
-        ld_lock.acquire()
-        for cdata in livedata.values():
+    def __init_event__(self):
+        try:
+            for class_name in olist: apic_ctrl.Class(class_name).event(Handler())
+        except Exception as e:
+            print '[ FAILED ]'
+            if debug: print str(e)
+            logstash_sock.close()
+            apic_ctrl.close()
+            exit(1)
+        print '[ OK ]'
+        
+    def __run__(self):
+        dd_lock.acquire()
+        for cdata in dumpdata.values():
             for data in cdata.values():
                 msg = json.dumps(data) + '\n'
                 logstash_sock.send(msg)
-        ld_lock.release()
-        print 'sending refresh data'
-
-class Subscriber(acidipy.Event):
-    
-    def subscribe(self, status, obj):
-        if self.class_name == 'healthInst': obj['cur'] = int(obj['cur'])
-        ld_lock.acquire()
-        if status == 'created':
-            obj['class_name'] = self.class_name
-            obj['rn'] = obj['dn']
-            livedata[class_name][obj['dn']] = obj
-        elif status == 'deleted':
-            livedata[class_name].pop(obj['dn'])
-        else:
-            for key, val in obj.items():
-                livedata[class_name][obj['dn']][key] = val
-        ld_lock.release()
-        print 'subscribe :', status
-        print json.dumps(obj, indent=2)
-        print ''
+        dd_lock.release()
+        if debug: print 'sending dump data'
 
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     
+    parser.add_argument('-d', '--debug', dest='debug', action='store_true', help='debug mode')
+    parser.set_defaults(debug=False)
     parser.add_argument('-l', '--logstash', help='logstash ip address', required=True)
-    parser.add_argument('-a', '--apic', help='apic ip address', required=True)
-    parser.add_argument('-u', '--user', help='apic user', required=True)
-    parser.add_argument('-p', '--password', help='apic password', required=True)
+    parser.add_argument('-e', '--eventmode', dest='dump', action='store_false', help='event trigger mode')
+    parser.set_defaults(dump=True)
     parser.add_argument('-r', '--refresh', default=10, help='refresh seconds')
+    parser.add_argument('-a', '--apic', help='apic ip address', required=True)
+    parser.add_argument('-u', '--username', help='apic user', required=True)
+    parser.add_argument('-p', '--password', help='apic password', required=True)
     parser.add_argument('-o', '--objects', nargs='+', help='inspect target objects', required=True)
+    
     args = parser.parse_args()
+    debug = args.debug
     logstash_ip = args.logstash
-    apic_ip = args.apic
-    apic_user = args.user
-    apic_pass = args.password
     refresh = int(args.refresh)
+    dump = args.dump
+    apic_ip = args.apic
+    apic_user = args.username
+    apic_pass = args.password
     olist = args.objects
+    
+    print 'setting is ...'
+    print 'debug :', debug
+    print 'logstash :', logstash_ip
+    print '  dump :', dump
+    print '  dump-refresh :', refresh
+    print 'apic :', apic_ip
+    print '  username :', apic_user
+    print '  password :', apic_pass
+    print 'objects :', olist
+    print ''
     
     print 'try to connect APIC --> ',
     try:
         apic_ctrl = acidipy.Controller(apic_ip, apic_user, apic_pass)
-    except:
+    except Exception as e:
         print '[ FAILED ]'
+        if debug: print str(e)
         exit(1)
     else:
         print '[ OK ]'
@@ -88,32 +143,14 @@ if __name__ == '__main__':
         logstash_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         logstash_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         logstash_sock.connect((logstash_ip, 8929))
-    except:
+    except Exception as e:
         print '[ FAILED ]'
+        if debug: print str(e)
         apic_ctrl.close()
         exit(1)
     else:
         print '[ OK ]'
-    
-    print 'collect initial data --> ',
-    try:
-        for class_name in olist:
-            livedata[class_name] = {}
-            results = apic_ctrl.Class(class_name).list(detail=True)
-            for result in results:
-                if class_name == 'healthInst': result['cur'] = int(result['cur'])
-                result['class_name'] = class_name
-                result['rn'] = result['dn']
-                livedata[class_name][result['dn']] = result
-            apic_ctrl.Class(class_name).subscribe(Subscriber())
-    except:
-        print '[ FAILED ]'
-        logstash_sock.close()
-        apic_ctrl.close()
-        exit(1)
-    else:
-        print '[ OK ]'
-    
-    Sender(refresh)
+
+    Trigger()
     
     pygics.Task.idle()
