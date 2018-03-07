@@ -100,7 +100,7 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--logstash', help='logstash ip address', required=True)
     parser.add_argument('-e', '--eventmode', dest='dump', action='store_false', help='event trigger mode')
     parser.set_defaults(dump=True)
-    parser.add_argument('-r', '--refresh', default=10, help='refresh seconds')
+    parser.add_argument('-r', '--refresh', default=10, help='refresh seconds of dump mode')
     parser.add_argument('-a', '--apic', help='apic ip address', required=True)
     parser.add_argument('-u', '--username', help='apic user', required=True)
     parser.add_argument('-p', '--password', help='apic password', required=True)
